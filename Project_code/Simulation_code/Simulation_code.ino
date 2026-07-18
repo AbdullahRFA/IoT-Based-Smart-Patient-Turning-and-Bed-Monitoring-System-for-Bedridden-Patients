@@ -1,10 +1,4 @@
-/# 
-Adafruit GFX Library
-Adafruit SSD1306
-DHT sensor library
-HX711
-ESP32Servo
-#/
+
 
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -42,7 +36,7 @@ void setup() {
   // Initialize Sensors & Actuators
   dht.begin();
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT)
   
   // Initialize Servo
   bedServo.attach(SERVO_PIN);
