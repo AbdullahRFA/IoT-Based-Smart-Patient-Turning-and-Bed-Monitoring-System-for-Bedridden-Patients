@@ -1,108 +1,228 @@
-
-
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <DHT.h>
-#include "HX711.h"
-#include <ESP32Servo.h> // Library for Servo control on ESP32
+#include <ESP32Servo.h>
 
-// Pin Definitions based on your table
-#define DHTPIN 4
-#define DHTTYPE DHT22
-#define BUZZER_PIN 13
-#define LOADCELL_DOUT_PIN 18
-#define LOADCELL_SCK_PIN 19
-#define SERVO_PIN 27 // Signal(PWM) pin from your table
+//================= PIN DEFINITIONS =================
+#define DHTPIN          4
+#define DHTTYPE         DHT22
 
-// OLED Configuration (I2C)
-#define SCREEN_WIDTH 128 
-#define SCREEN_HEIGHT 64 
-// SCL is GPIO 21, SDA is GPIO 22 as per your table
+#define FSR_PIN         34
+#define BUZZER_PIN      13
+#define SERVO_PIN       27
+
+#define SCREEN_WIDTH    128
+#define SCREEN_HEIGHT   64
+
+//================= OBJECTS =================
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
-
 DHT dht(DHTPIN, DHTTYPE);
-HX711 scale;
 Servo bedServo;
 
-// Variables for logic
-unsigned long lastMoveTime = 0;
-const unsigned long moveInterval = 10000; // Demo: 10 seconds (Change for real use)
+//================= VARIABLES =================
 bool isTilted = false;
 
-void setup() {
-  Serial.begin(115200);
-  
-  // Initialize Sensors & Actuators
-  dht.begin();
-  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  pinMode(BUZZER_PIN, OUTPUT)
-  
-  // Initialize Servo
-  bedServo.attach(SERVO_PIN);
-  bedServo.write(0); // Set initial position (flat)
-  
-  // Initialize OLED on I2C pins 21 (SCL) and 22 (SDA)
-  Wire.begin(22, 21); // Wire.begin(SDA, SCL)
-  
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
-    Serial.println(F("OLED Connection Failed"));
-    for(;;);
-  }
-  
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0,0);
-  display.println("Patient Monitoring");
-  display.println("System Initializing...");
-  display.display();
-  delay(2000);
+unsigned long previousServoMillis = 0;
+const unsigned long servoInterval = 10000;   // 10 seconds
+
+//==================================================
+// Function: Beep buzzer when patient position changes
+//==================================================
+void notifyShift()
+{
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(500);          // Beep for 0.5 second
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
-void loop() {
-  // Reading environmental data
-  float humidity = dht.readHumidity();
-  float temp = dht.readTemperature();
+//==================================================
+// Function: Move servo smoothly between two angles
+//==================================================
+void moveServoSmoothly(int startAngle, int endAngle) 
+{
+  int stepDelay = 20; // Time in milliseconds between each degree. Increase to slow down.
   
-  // Reading weight/pressure data
-  long raw_weight = 0;
-  if (scale.is_ready()) {
-    raw_weight = scale.read(); 
+  if (startAngle < endAngle) 
+  {
+    for (int pos = startAngle; pos <= endAngle; pos++) 
+    {
+      bedServo.write(pos);
+      delay(stepDelay);
+    }
+  } 
+  else 
+  {
+    for (int pos = startAngle; pos >= endAngle; pos--) 
+    {
+      bedServo.write(pos);
+      delay(stepDelay);
+    }
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  dht.begin();
+
+  // OLED
+  Wire.begin(21, 22);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
+  {
+    Serial.println("OLED Failed");
+    while (true);
   }
 
-  // Automatic Bed Tilt Logic
-  // If the patient is immobile for too long, tilt the bed
-  if (millis() - lastMoveTime > moveInterval) {
-    if (!isTilted) {
-      bedServo.write(30); // Tilt to 30 degrees
-      isTilted = true;
-    } else {
-      bedServo.write(0);  // Return to flat
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(10, 20);
+  display.println("Patient Monitor");
+  display.display();
+
+  delay(2000);
+
+  // Servo
+  bedServo.setPeriodHertz(50);
+  bedServo.attach(SERVO_PIN, 500, 2400);
+  bedServo.write(10); // Start at 10 degrees (Flat)
+}
+
+void loop()
+{
+  //-------------------- Read Sensors ------------------------
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+
+  int fsrValue = analogRead(FSR_PIN);
+
+  if (isnan(temperature) || isnan(humidity))
+  {
+    Serial.println("DHT Error");
+    return;
+  }
+
+  //-------------------- Servo Control ------------------------
+  // Toggles the bed between 10 and 120 degrees every 10 seconds if a patient is present
+  if (millis() - previousServoMillis >= servoInterval)
+  {
+    previousServoMillis = millis();
+
+    if (isTilted && fsrValue > 100)
+    {
+      Serial.println("Returning Bed Flat (10 degrees)");
+
+      // Move smoothly from 120 down to 10
+      moveServoSmoothly(120, 10);
+      notifyShift();        // Beep once
+
       isTilted = false;
     }
-    lastMoveTime = millis();
+    else if (!isTilted && fsrValue > 100)
+    {
+      Serial.println("Tilting Bed (120 degrees)");
+
+      // Move smoothly from 10 up to 120
+      moveServoSmoothly(10, 120);
+      notifyShift();
+
+      isTilted = true;
+    }
+    else
+    {
+      Serial.println("Patient is absent - Skipping tilt");
+    }
   }
 
-  // Displaying data on OLED
-  display.clearDisplay();
-  display.setCursor(0,0);
-  display.println("PATIENT MONITOR");
-  display.println("---------------------");
-  display.print("Temp: "); display.print(temp); display.println(" C");
-  display.print("Hum:  "); display.print(humidity); display.println(" %");
-  display.print("Load: "); display.println(raw_weight);
-  display.print("Tilt Status: "); display.println(isTilted ? "Active" : "Flat");
-  
-  // Alert Logic
-  if (temp > 38.0 || (isTilted && temp > 35.0)) { 
+  //-------------------- Alarm Logic ------------------------
+  bool alarm = false;
+
+  if (temperature > 38.0)
+    alarm = true;
+
+  if (fsrValue < 100)
+    alarm = true;
+
+  // Continuous alarm
+  if (alarm)
+  {
     digitalWrite(BUZZER_PIN, HIGH);
-    display.setCursor(0, 55);
-    display.print("!! CHECK PATIENT !!");
-  } else {
+  }
+  else
+  {
     digitalWrite(BUZZER_PIN, LOW);
   }
-  
+
+  //-------------------- OLED ------------------------
+  display.clearDisplay();
+
+  display.setCursor(0, 0);
+  display.println("PATIENT MONITOR");
+  display.println("----------------");
+
+  display.print("Temp : ");
+  display.print(temperature, 1);
+  display.println(" C");
+
+  display.print("Hum  : ");
+  display.print(humidity, 1);
+  display.println(" %");
+
+  display.print("FSR  : ");
+  display.println(fsrValue);
+
+  display.print("Servo: ");
+
+  if (isTilted)
+    display.println("TILT (120)");
+  else
+    display.println("FLAT (10)");
+
+  display.print("Patient: ");
+
+  if (fsrValue > 100)
+    display.println("Present");
+  else
+    display.println("Absent");
+
+  if (alarm)
+  {
+    display.println();
+    display.println("*** ALERT ***");
+  }
+
   display.display();
-  delay(2000); 
+
+  //-------------------- Serial Monitor ------------------------
+  Serial.print("Temperature : ");
+  Serial.print(temperature);
+
+  Serial.print(" C  Humidity : ");
+  Serial.print(humidity);
+
+  Serial.print(" %  FSR : ");
+  Serial.print(fsrValue);
+
+  Serial.print("  Servo : ");
+
+  if (isTilted)
+    Serial.print("Tilt(120)");
+  else
+    Serial.print("Flat(10)");
+
+  Serial.print("  Patient: ");
+  if (fsrValue > 100)
+    Serial.println("Present");
+  else
+    Serial.println("Absent");
+
+  delay(500);
+  Serial.println("");
 }
